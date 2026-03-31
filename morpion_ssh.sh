@@ -2,26 +2,16 @@
 
 ROOM="${1:-default}"
 BASE="/tmp/morpion_ssh_$ROOM"
+STATE="$BASE/state"
+PLAYERS="$BASE/players"
+LOCKFILE="$BASE/lockfile"
 
-STATE="$BASE.state"
-PLAYERS="$BASE.players"
-LOCKDIR="$BASE.lock"
-
-mkdir -p /tmp
-
-lock() {
-    while ! mkdir "$LOCKDIR" 2>/dev/null; do
-        sleep 0.1
-    done
-}
-
-unlock() {
-    rmdir "$LOCKDIR" 2>/dev/null
-}
+mkdir -p "$BASE"
+chmod 777 "$BASE"
 
 init_game() {
-    mkdir -p "$BASE"
-    cat > "$STATE" <<EOF
+    if [[ ! -f "$STATE" ]]; then
+        cat > "$STATE" <<EOF
 c1=1
 c2=2
 c3=3
@@ -36,7 +26,18 @@ coups=0
 gagnant=
 terminee=0
 EOF
-    : > "$PLAYERS"
+        chmod 666 "$STATE"
+    fi
+
+    if [[ ! -f "$PLAYERS" ]]; then
+        : > "$PLAYERS"
+        chmod 666 "$PLAYERS"
+    fi
+
+    if [[ ! -f "$LOCKFILE" ]]; then
+        : > "$LOCKFILE"
+        chmod 666 "$LOCKFILE"
+    fi
 }
 
 load_state() {
@@ -60,6 +61,7 @@ coups=$coups
 gagnant=$gagnant
 terminee=$terminee
 EOF
+    chmod 666 "$STATE"
 }
 
 display_grid() {
@@ -125,35 +127,35 @@ verifier_victoire() {
 }
 
 register_player() {
-    lock
+    exec 9>"$LOCKFILE"
+    flock 9
 
-    [[ -d "$BASE" ]] || init_game
-    [[ -f "$PLAYERS" ]] || : > "$PLAYERS"
+    init_game
+
+    if grep -q "^${USER}:" "$PLAYERS" 2>/dev/null; then
+        MOI=$(grep "^${USER}:" "$PLAYERS" | head -n1 | cut -d: -f2)
+        flock -u 9
+        return
+    fi
 
     local count
     count=$(wc -l < "$PLAYERS")
 
-    if grep -q "^$$:" "$PLAYERS" 2>/dev/null; then
-        MOI=$(grep "^$$:" "$PLAYERS" | cut -d: -f2)
-        unlock
-        return
-    fi
-
     if [[ "$count" -eq 0 ]]; then
         MOI="X"
-        echo "$$:X" >> "$PLAYERS"
+        echo "${USER}:X" >> "$PLAYERS"
         echo "En attente du joueur O..."
     elif [[ "$count" -eq 1 ]]; then
         MOI="O"
-        echo "$$:O" >> "$PLAYERS"
+        echo "${USER}:O" >> "$PLAYERS"
         echo "Joueur O connecté. La partie commence."
     else
-        unlock
+        flock -u 9
         echo "La salle est pleine."
         exit 1
     fi
 
-    unlock
+    flock -u 9
 }
 
 wait_for_second_player() {
@@ -166,24 +168,26 @@ wait_for_second_player() {
 }
 
 cleanup_player() {
-    lock
+    exec 9>"$LOCKFILE"
+    flock 9
+
     if [[ -f "$PLAYERS" ]]; then
-        grep -v "^$$:" "$PLAYERS" > "$PLAYERS.tmp" 2>/dev/null || true
+        grep -v "^${USER}:" "$PLAYERS" > "$PLAYERS.tmp" 2>/dev/null || true
         mv "$PLAYERS.tmp" "$PLAYERS" 2>/dev/null || true
+        chmod 666 "$PLAYERS" 2>/dev/null || true
     fi
-    unlock
+
+    flock -u 9
 }
 
 trap cleanup_player EXIT
 
+init_game
 register_player
 wait_for_second_player
 
 while true; do
-    lock
     load_state
-    unlock
-
     display_grid
 
     if [[ "$terminee" -eq 1 ]]; then
@@ -200,7 +204,7 @@ while true; do
     fi
 
     if [[ "$joueur" != "$MOI" ]]; then
-        echo "Tour de l'autre joueur... actualisation."
+        echo "Tour de l'autre joueur..."
         sleep 1
         continue
     fi
@@ -217,21 +221,23 @@ while true; do
             ;;
     esac
 
-    lock
+    exec 9>"$LOCKFILE"
+    flock 9
+
     load_state
 
     if [[ "$terminee" -eq 1 ]]; then
-        unlock
+        flock -u 9
         continue
     fi
 
     if [[ "$joueur" != "$MOI" ]]; then
-        unlock
+        flock -u 9
         continue
     fi
 
     if ! case_disponible "$choix"; then
-        unlock
+        flock -u 9
         echo "Case déjà prise."
         sleep 1
         continue
@@ -255,5 +261,5 @@ while true; do
     fi
 
     save_state
-    unlock
+    flock -u 9
 done
